@@ -11,6 +11,7 @@ import numpy
 import os
 import re
 import tifffile
+from merlin.util import dataportal
 
 
 # Avoid making astropy mandatory for everybody.
@@ -157,33 +158,34 @@ class DaxReader(Reader):
     """
     Dax reader class. This is a Zhuang lab custom format.
     """
-    def __init__(self, filename, verbose = False):
-        super(DaxReader, self).__init__(filename, verbose = verbose)
-        
-        # save the filenames
-        dirname = os.path.dirname(filename)
-        if (len(dirname) > 0):
-            dirname = dirname + "/"
-        self.inf_filename = dirname + os.path.splitext(os.path.basename(filename))[0] + ".inf"
+
+    def __init__(self, filePortal: dataportal.FilePortal,
+                 verbose: bool = False):
+        super(DaxReader, self).__init__(
+            filePortal.get_file_name(), verbose=verbose)
+
+        self._filePortal = filePortal
+        infFile = filePortal.get_sibling_with_extension('.inf')
+        self._parse_inf(infFile.read_as_text().splitlines())
+
+    def close(self):
+        self._filePortal.close()
+
+    def _parse_inf(self, inf_lines: List[str]) -> None:
+        size_re = re.compile(r'frame dimensions = ([\d]+) x ([\d]+)')
+        length_re = re.compile(r'number of frames = ([\d]+)')
+        endian_re = re.compile(r' (big|little) endian')
+        stagex_re = re.compile(r'Stage X = ([\d.\-]+)')
+        stagey_re = re.compile(r'Stage Y = ([\d.\-]+)')
+        lock_target_re = re.compile(r'Lock Target = ([\d.\-]+)')
+        scalemax_re = re.compile(r'scalemax = ([\d.\-]+)')
+        scalemin_re = re.compile(r'scalemin = ([\d.\-]+)')
 
         # defaults
         self.image_height = None
         self.image_width = None
 
-        # extract the movie information from the associated inf file
-        size_re = re.compile(r'frame dimensions = ([\d]+) x ([\d]+)')
-        length_re = re.compile(r'number of frames = ([\d]+)')
-        endian_re = re.compile(r' (big|little) endian')
-        stagex_re = re.compile(r'Stage X = ([\d\.\-]+)')
-        stagey_re = re.compile(r'Stage Y = ([\d\.\-]+)')
-        lock_target_re = re.compile(r'Lock Target = ([\d\.\-]+)')
-        scalemax_re = re.compile(r'scalemax = ([\d\.\-]+)')
-        scalemin_re = re.compile(r'scalemin = ([\d\.\-]+)')
-
-        inf_file = open(self.inf_filename, "r")
-        while 1:
-            line = inf_file.readline()
-            if not line: break
+        for line in inf_lines:
             m = size_re.match(line)
             if m:
                 self.image_height = int(m.group(2))
@@ -213,33 +215,31 @@ class DaxReader(Reader):
             if m:
                 self.scalemin = int(m.group(1))
 
-        inf_file.close()
-
-        # set defaults, probably correct, but warn the user 
+        # set defaults, probably correct, but warn the user
         # that they couldn't be determined from the inf file.
         if not self.image_height:
             print("Could not determine image size, assuming 256x256.")
             self.image_height = 256
             self.image_width = 256
 
-        # open the dax file
-        if os.path.exists(filename):
-            self.fileptr = open(filename, "rb")
-        else:
-            if self.verbose:
-                print("dax data not found", filename)
-
-    def loadAFrame(self, frame_number):
+    def load_frame(self, frame_number):
         """
-        Load a frame & return it as a numpy array.
+        Load a frame & return it as a np array.
         """
-        super(DaxReader, self).loadAFrame(frame_number)
+        super(DaxReader, self).load_frame(frame_number)
 
-        self.fileptr.seek(frame_number * self.image_height * self.image_width * 2)
-        image_data = numpy.fromfile(self.fileptr, dtype='uint16', count = self.image_height * self.image_width)
-        image_data = numpy.reshape(image_data, [self.image_height, self.image_width])
+        startByte = frame_number * self.image_height * self.image_width * 2
+        endByte = startByte + 2*(self.image_height * self.image_width)
+
+        dataFormat = np.dtype('uint16')
         if self.bigendian:
-            image_data.byteswap(True)
+            dataFormat = dataFormat.newbyteorder('>')
+
+        image_data = np.frombuffer(
+            self._filePortal.read_file_bytes(startByte, endByte),
+            dtype=dataFormat)
+        image_data = np.reshape(image_data,
+                                [self.image_height, self.image_width])
         return image_data
 
 
